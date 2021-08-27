@@ -1,21 +1,24 @@
-seed: 1822
+seed: 3241
 
 ### data ###
 data_root: "data/NYU"
 remote_data_root: "/cluster_home/custom_data/NYU"
 remote_save_dir: "/job_data"
-batch_size: 1
+save_dir: "data/NYU/output"
+batch_size: 16
 
 ### model ###
-task: 'segmentation'
+task: 'multitask'
 learning_rate: 2e-5
-use_gradnorm: True
-
+use_gradnorm: False
+checkpoint_path: "/data/dixiao.wei/NYU/output/sample-NYUv2-segmentation-epoch=937-val_loss=2.41.ckpt"
+output_image: "data/NYU/inference"
 ### lightning ###
 lightning:
-  max_epochs: 8890
-  gpus: 1,3
-  check_val_every_n_epoch: 1
+  max_epochs: 1540
+  gpus: 4
+  check_val_every_n_epoch: 10
   accelerator: "ddp"
   log_every_n_steps: 5
   num_sanity_val_steps: 0
+  precision: 16

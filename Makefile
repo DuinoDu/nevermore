@@ -2,9 +2,10 @@
 ####### MLOps #######
 
 train:
-	python tools/train.py
+	python3 tools/train.py
 
-
+submit:
+	python3 tools/submit.py
 ####### DEVOps #######
 
 dev:

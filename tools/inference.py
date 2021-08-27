@@ -11,6 +11,7 @@ from omegaconf import DictConfig
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
 
 from nevermore.dataset import NUM_CLASSES, NYUv2Dateset
 from nevermore.metric import Abs_CosineSimilarity
@@ -28,7 +29,7 @@ DEP_NUM_OUTPUT_CHANNELS = 1
 NOR_NUM_OUTPUT_CHANNELS = 3
 INPUT_SIZE = (320,320)
 OUTPUT_SIZE = (320,320)
-
+OUTPUT_DIR = "data/NYU/inference"
 ########
 # DATA #
 ########
@@ -58,6 +59,7 @@ class DataModule(pl.LightningDataModule):
         self.normal_dir = normal_dir
         self.input_size = input_size
         self.output_size = output_size
+
         # self.transform = transforms.Compose([
         #     transforms.ToTensor(),
         #     transforms.Normalize((0.1307,), (0.3081,))
@@ -143,15 +145,11 @@ class Model(pl.LightningModule):
             nor_output_channels=nor_output_channels
         )
 
-
-        self.gradnorm = GradNorm(....)
-
         self.miou = torchmetrics.IoU(
             num_classes=seg_output_channels, ignore_index=0
         )
         self.rmse = torchmetrics.MeanSquaredError(squared=False)
         self.cos = Abs_CosineSimilarity(reduction='abs')
-
 
         allowed_task = ("segmentation", "depth", "normal", "multitask")
         if task not in allowed_task:
@@ -160,21 +158,11 @@ class Model(pl.LightningModule):
                 f"{allowed_task} but got {task}"
             )
         self.task = task
-
         self.use_gradnorm = use_gradnorm
 
-        if self.use_gradnorm:
-            self.weights = torch.nn.Parameter(torch.tensor([1.,1.,1.]))
-            self.weights_temp = torch.tensor([1.,1.,1.])
-
     def forward(self, x):
-        return self.segnet.forward(x)
 
-    def on_train_start(self):
-        if self.use_gradnorm:
-            self.initial_losses = torch.tensor([1,1,1]).cuda()
-            self.alpha = 1.5
-            pass
+        return self.segnet.forward(x)
 
     def training_step(self, batch, batch_idx):
         x = batch['image']
@@ -186,21 +174,18 @@ class Model(pl.LightningModule):
         if self.task == 'multitask' or self.task == 'depth':
             y_dep = batch['depth']
             y_dep_hat = y_dep_hat.squeeze()
-            loss_dep = F.mse_loss(y_dep_hat, y_dep)
+            loss_dep = torch.sqrt(F.mse_loss(y_dep_hat, y_dep))
         if self.task == 'multitask' or self.task == 'normal':
             y_nor = batch['normal'].flatten(start_dim=1)
-            y_nor_hat = y_nor_hat.flatten(
+            y_nor_hat = y_nor_hat.transpose(1, 2).transpose(2, 3).flatten(
                 start_dim=1
             )
-            loss_nor = torch.mean(F.cosine_similarity(y_nor_hat, y_nor))
-
-        loss = self.gradnorm([l1, l2, l3])
+            loss_nor = torch.mean(
+                1 - torch.abs(F.cosine_similarity(y_nor_hat, y_nor))
+            )
 
         if self.task == 'multitask':
-            if self.use_gradnorm:
-                loss = self.weights[0] * loss_seg + self.weights[1] * loss_dep + self.weights[2] * loss_nor
-            else:
-                loss = loss_seg + loss_dep + loss_nor
+            loss = loss_seg + loss_dep + loss_nor
             self.log('train_loss', loss)
             self.log('train_loss_seg', loss_seg, prog_bar=True)
             self.log('train_loss_dep', loss_dep, prog_bar=True)
@@ -214,47 +199,8 @@ class Model(pl.LightningModule):
         elif self.task == 'normal':
             loss = loss_nor
             self.log('train_loss', loss)
-
-        # gradnorm
-        if self.use_gradnorm:
-            # if self.segnet.weights.grad:
-            #     self.segnet.weights.grad.data = self.segnet.weights.grad.data * 0.0
-            # get the gradient norms for each of the tasks
-            norms = []
-            W = self.segnet.decoder_convtr_01
-            gygw_seg = torch.autograd.grad(loss_seg, W.parameters(), retain_graph=True)
-            norms.append(torch.norm(torch.mul(self.weights[0], gygw_seg[0])))
-            gygw_dep = torch.autograd.grad(loss_dep, W.parameters(), retain_graph=True)
-            norms.append(torch.norm(torch.mul(self.weights[1], gygw_dep[0])))
-            gygw_nor = torch.autograd.grad(loss_nor, W.parameters(), retain_graph=True)
-            norms.append(torch.norm(torch.mul(self.weights[2], gygw_nor[0])))
-            norms = torch.stack(norms)
-
-            # compute the inverse training rate r_i(t)
-            task_losses = torch.stack((loss_seg.clone().detach(),loss_dep.clone().detach(),loss_nor.clone().detach()))
-            loss_ratio = task_losses / self.initial_losses
-            inverse_train_rate = loss_ratio / torch.mean(loss_ratio)
-
-            # compute the mean norm \tilde{G}_w(t)
-            mean_norm = torch.mean(norms.clone().detach())
-
-            # compute the GradNorm loss 
-            # this term has to remain constant
-            # constant_term = torch.tensor(mean_norm * (inverse_train_rate ** self.alpha), requires_grad=False)
-            constant_term = (mean_norm * (inverse_train_rate ** self.alpha)).clone().detach().requires_grad_(False)
-             # this is the GradNorm loss itself
-            grad_norm_loss = torch.sum(torch.abs(norms - constant_term))
-
-            # compute the gradient for the weights
-            self.weights_temp = torch.autograd.grad(grad_norm_loss, self.weights)[0]
-
         return loss
 
-    # def backward(self, loss, optimizer, optimizer_idx):
-    #     loss.backward()
-    #     if self.use_gradnorm:
-    #         self.weights.grad = self.weights_temp
-    #     pass
     def training_epoch_end(self, training_step_outputs):
         for out in training_step_outputs:
             pass
@@ -269,13 +215,15 @@ class Model(pl.LightningModule):
         if self.task == 'multitask' or self.task == 'depth':
             y_dep = batch['depth']
             y_dep_hat = y_dep_hat.squeeze()
-            loss_dep = F.mse_loss(y_dep_hat, y_dep)
+            loss_dep = torch.sqrt(F.mse_loss(y_dep_hat, y_dep))
         if self.task == 'multitask' or self.task == 'normal':
             y_nor = batch['normal'].flatten(start_dim=1)
             y_nor_hat = y_nor_hat.flatten(
                 start_dim=1
             )
-            loss_nor = torch.mean(F.cosine_similarity(y_nor_hat, y_nor))
+            loss_nor = torch.mean(
+                1 - torch.abs(F.cosine_similarity(y_nor_hat, y_nor))
+            )
 
         if self.task == 'multitask':
             loss = loss_seg + loss_dep + loss_nor
@@ -314,7 +262,31 @@ class Model(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         x = batch['image']
         y_seg_hat, y_dep_hat, y_nor_hat, _ = self(x)
-        pass
+        for idx, predicted_mask in enumerate(y_seg_hat):
+                target_mask = batch['mask'][idx]
+                input_image = batch['image'][idx]
+                image_name = batch['image_name'][idx]
+                fig = plt.figure()
+
+                a = fig.add_subplot(1,3,1)
+                input_image_show = input_image.detach().cpu().numpy()
+                plt.imshow(input_image_show.transpose(2,1,0))
+                a.set_title('Input Image')
+
+                a = fig.add_subplot(1,3,2)
+                predicted_mx = predicted_mask.detach().cpu().numpy()
+                predicted_mx = predicted_mx.argmax(axis=0)
+                plt.imshow(predicted_mx)
+                a.set_title('Predicted Mask')
+
+                a = fig.add_subplot(1,3,3)
+                target_mx = target_mask.detach().cpu().numpy()
+                plt.imshow(target_mx)
+                a.set_title('Ground Truth')
+
+                fig.savefig(os.path.join(OUTPUT_DIR, "prediction_" + image_name + ".png"))
+
+                plt.close(fig)
     
 
 
@@ -329,10 +301,10 @@ class Model(pl.LightningModule):
             optimizer, lr_lambda, last_epoch=-1
         )
         optim_dict = {'optimizer': optimizer, 'lr_scheduler': lr_schedule}
-        # if self.task == 'multitask':
-        #     return optimizer
-        # else:
-        return optim_dict
+        if self.task == 'multitask':
+            return optimizer
+        else:
+            return optim_dict
 
 
 #########
@@ -360,7 +332,7 @@ def main(cfg: DictConfig):
     mask_dir = os.path.join(data_root, "segmentation")
     depth_dir = os.path.join(data_root, "depths")
     normal_dir = os.path.join(data_root, "normals")
-
+    output_dir = os.path.join(data_root, "inference",cfg.task)
     # ------------
     # data
     # ------------
@@ -374,7 +346,7 @@ def main(cfg: DictConfig):
         depth_dir=depth_dir,
         normal_dir=normal_dir,
         input_size=INPUT_SIZE,
-        output_size=OUTPUT_SIZE
+        output_size=OUTPUT_SIZE,
     )
 
     # ------------
@@ -387,31 +359,15 @@ def main(cfg: DictConfig):
         nor_output_channels=NOR_NUM_OUTPUT_CHANNELS,
         learning_rate=cfg.learning_rate,
         task=cfg.task,
-        use_gradnorm=cfg.use_gradnorm
+        use_gradnorm=cfg.use_gradnorm,
     )
 
     # ------------
-    # callback
+    # inference
     # ------------
-    checkpoint_callback = ModelCheckpoint(
-        monitor='val_loss',
-        dirpath=save_dir,
-        filename='sample-NYUv2-' + cfg.task + '-{epoch:02d}-{val_loss:.2f}'
-    )
-
-    # ------------
-    # training
-    # ------------
-    pl_config = edict(cfg.lightning)
-    # pl_config['callbacks'] = [checkpoint_callback]
-    pl_config['default_root_dir'] =  save_dir
-    trainer = pl.Trainer(**pl_config)
-    trainer.fit(model, dm)
-
-    # ------------
-    # testing
-    # ------------
-    # trainer.test(test_model, datamodule=dm)
+    test_model = model.load_from_checkpoint(checkpoint_path=cfg.checkpoint_path)
+    trainer = pl.Trainer(gpus=1)
+    trainer.test(test_model, datamodule=dm)
 
 
 if __name__ == '__main__':

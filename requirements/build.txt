@@ -1,5 +1,6 @@
 torch
 torchvision
 pytorch-lightning
-hydra
 easydict
+hydra-core
+importlib-resources>=5.2.2
