@@ -40,8 +40,7 @@ class SegNet(nn.Module):
 
         self.num_channels = input_channels
 
-        self.weights_model = torch.nn.Parameter(torch.tensor([1]))
-        nn.GroupNorm
+
         # Encoder layers
 
         self.encoder_conv_00 = nn.Sequential(
