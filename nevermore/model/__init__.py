@@ -1,1 +1,1 @@
-from .gradnorm import SegNet
+from .segnet import SegNet

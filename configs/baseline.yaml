@@ -6,13 +6,14 @@ remote_data_root: "/cluster_home/custom_data/NYU"
 remote_save_dir: "/job_data"
 save_dir: "data/NYU/output"
 batch_size: 16
+input_size: (320,320)
+output_size: (320,320)
 
 ### model ###
 task: 'multitask'
 learning_rate: 2e-5
 use_gradnorm: False
-checkpoint_path: "/data/dixiao.wei/NYU/output/sample-NYUv2-segmentation-epoch=937-val_loss=2.41.ckpt"
-output_image: "data/NYU/inference"
+
 ### lightning ###
 lightning:
   max_epochs: 1540
@@ -22,3 +23,4 @@ lightning:
   log_every_n_steps: 5
   num_sanity_val_steps: 0
   precision: 16
+  
